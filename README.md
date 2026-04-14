@@ -64,6 +64,12 @@ docker run -it --name tg-update -v $(pwd):/app tg-username-update --init-config
 docker pull m3184876/telegram-name-updating:latest
 ```
 
+### 后续步骤
+1. 请确保您在 GitHub 仓库的 **Settings > Secrets and variables > Actions** 中添加了以下两个 Repository secrets：
+   - `DOCKERHUB_USERNAME`: 您的 Docker Hub 用户名 (`m3184876`)。
+   - `DOCKERHUB_TOKEN`: 您的 Docker Hub 访问令牌 (Access Token)。
+2. 将代码推送到 GitHub 的 `main` 或 `master` 分支，工作流将自动触发构建并发布。
+
 ### 注意事项
 - 请确保 `config.local.json` 和 `.session` 文件在宿主机上，并通过挂载卷持久化，否则容器重启后需要重新登录。
 - API ID 和 API Hash 可以从 [my.telegram.org](https://my.telegram.org) 获取。
