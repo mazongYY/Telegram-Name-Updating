@@ -51,6 +51,19 @@ docker run -it --name tg-update -v $(pwd):/app tg-username-update --init-config
    docker attach tg-username-update
    ```
 
+## GitHub Actions
+
+本项目已配置 GitHub Actions 工作流，支持以下功能：
+- **自动测试**：在代码推送或拉取请求时运行 Lint 检查。
+- **自动构建并发布**：
+  - 当代码推送到 `main` 或 `master` 分支时，自动构建 Docker 镜像并发布到 Docker Hub (`m3184876/telegram-name-updating`)。
+  - 当发布新的 Tag (如 `v1.0.0`) 时，自动生成对应的版本镜像。
+
+您可以从 Docker Hub 获取镜像：
+```bash
+docker pull m3184876/telegram-name-updating:latest
+```
+
 ### 注意事项
 - 请确保 `config.local.json` 和 `.session` 文件在宿主机上，并通过挂载卷持久化，否则容器重启后需要重新登录。
 - API ID 和 API Hash 可以从 [my.telegram.org](https://my.telegram.org) 获取。
