@@ -1,0 +1,13 @@
+services:
+  tg-update:
+    build: .
+    container_name: tg-username-update
+    # 如果需要交互式登录（首次运行），请启用以下两项并使用 docker attach
+    stdin_open: true
+    tty: true
+    volumes:
+      # 将配置文件挂载到容器中
+      - ./config.local.json:/app/config.local.json
+      # 将会话文件挂载到容器中，以持久化登录状态
+      - ./api_auth.session:/app/api_auth.session
+    restart: unless-stopped
