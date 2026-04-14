@@ -1,0 +1,4 @@
+emoji>=2.15.0,<3.0.0
+telethon>=1.42.0,<2.0.0
+python-socks[asyncio]
+tzdata>=2025.2
