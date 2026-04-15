@@ -1,3 +1,12 @@
+---
+title: Telegram Name Updating
+emoji: 🤖
+colorFrom: blue
+colorTo: cyan
+sdk: docker
+pinned: false
+---
+
 # Telegram-Name-Updating
 
 自动更新 Telegram 账户的第一名称 (First Name)，使其包含当前时间（时钟 Emoji 形式）。
@@ -73,3 +82,18 @@ docker pull m3184876/telegram-name-updating:latest
 ### 注意事项
 - 请确保 `config.local.json` 和 `.session` 文件在宿主机上，并通过挂载卷持久化，否则容器重启后需要重新登录。
 - API ID 和 API Hash 可以从 [my.telegram.org](https://my.telegram.org) 获取。
+
+## 在 Hugging Face Space 上如何登录 Telegram 账户
+
+这个项目首次登录 Telegram 需要输入短信验证码，因此建议先在本地完成一次授权，再把会话文件同步到运行环境。
+
+1. 在本地运行初始化：
+   ```bash
+   python tg_username_update.py --init-config
+   ```
+2. 本地启动一次主程序并按提示输入 Telegram 验证码（如果开启二步验证，也输入密码）：
+   ```bash
+   python tg_username_update.py
+   ```
+3. 成功后会生成会话文件（默认 `api_auth.session`），后续运行无需再次登录。
+4. 部署到服务器 / 容器 / Space 时，确保 `config.local.json` 和 `api_auth.session` 能被持久化挂载，否则重启后会丢失登录状态。
