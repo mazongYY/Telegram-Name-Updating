@@ -2,7 +2,7 @@
 title: Telegram Name Updating
 emoji: 🤖
 colorFrom: blue
-colorTo: cyan
+colorTo: indigo
 sdk: docker
 pinned: false
 ---
@@ -97,3 +97,4 @@ docker pull m3184876/telegram-name-updating:latest
    ```
 3. 成功后会生成会话文件（默认 `api_auth.session`），后续运行无需再次登录。
 4. 部署到服务器 / 容器 / Space 时，确保 `config.local.json` 和 `api_auth.session` 能被持久化挂载，否则重启后会丢失登录状态。
+
