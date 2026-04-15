@@ -8,12 +8,15 @@ import asyncio
 import getpass
 import json
 import logging
+import os
 import random
 import signal
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, tzinfo
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -63,6 +66,24 @@ DIZZY = emojize(":dizzy:", language="alias")
 CAKE = emojize(":cake:", language="alias")
 
 LOGGER = logging.getLogger(__name__)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+def start_health_server(port: int) -> None:
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    LOGGER.info("Health check server started on port %s", port)
 
 
 @dataclass(slots=True)
@@ -273,6 +294,58 @@ def save_file_config(config_path: Path, config: FileConfig) -> None:
     )
 
 
+def parse_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise RuntimeError(f"环境变量 {name} 的布尔值无效：{value!r}")
+
+
+def load_env_file_config() -> FileConfig | None:
+    api_id_raw = os.getenv("TG_API_ID")
+    api_hash = normalize_optional_text(os.getenv("TG_API_HASH", ""))
+    phone_number = normalize_optional_text(os.getenv("TG_PHONE_NUMBER", ""))
+    if api_id_raw is None or api_hash is None or phone_number is None:
+        return None
+
+    try:
+        api_id = int(api_id_raw)
+    except ValueError as exc:
+        raise RuntimeError("环境变量 TG_API_ID 必须是整数。") from exc
+
+    proxy_port_raw = normalize_optional_text(os.getenv("TG_PROXY_PORT", ""))
+    proxy_port = int(proxy_port_raw) if proxy_port_raw else None
+
+    return FileConfig(
+        api_id=api_id,
+        api_hash=api_hash,
+        phone_number=phone_number,
+        timezone=os.getenv("TG_TIMEZONE", "Asia/Shanghai"),
+        session_name=os.getenv("TG_SESSION_NAME", DEFAULT_SESSION_NAME),
+        update_interval=int(os.getenv("TG_UPDATE_INTERVAL", "30")),
+        first_name=normalize_optional_text(os.getenv("TG_FIRST_NAME", "")),
+        username=normalize_optional_text(os.getenv("TG_USERNAME", "")),
+        last_name_prefix=os.getenv("TG_LAST_NAME_PREFIX", ""),
+        last_name_suffix=os.getenv("TG_LAST_NAME_SUFFIX", ""),
+        proxy_type=normalize_optional_text(os.getenv("TG_PROXY_TYPE", "")),
+        proxy_host=normalize_optional_text(os.getenv("TG_PROXY_HOST", "")),
+        proxy_port=proxy_port,
+        proxy_username=normalize_optional_text(os.getenv("TG_PROXY_USERNAME", "")),
+        proxy_password=normalize_optional_text(os.getenv("TG_PROXY_PASSWORD", "")),
+        proxy_rdns=parse_bool_env("TG_PROXY_RDNS", True),
+        two_step_password=normalize_optional_text(os.getenv("TG_TWO_STEP_PASSWORD", "")),
+        run_on_start=parse_bool_env("TG_RUN_ON_START", True),
+        reset_last_name_on_exit=parse_bool_env("TG_RESET_LAST_NAME_ON_EXIT", False),
+        dry_run=parse_bool_env("TG_DRY_RUN", False),
+        log_level=os.getenv("TG_LOG_LEVEL", "INFO"),
+    )
+
+
 def prompt_create_file_config(config_path: Path) -> FileConfig:
     print(f"未找到配置文件，开始初始化：{config_path}")
     api_id = prompt_int("TG_API_ID")
@@ -332,9 +405,21 @@ def prompt_create_file_config(config_path: Path) -> FileConfig:
 
 
 def ensure_file_config(config_path: Path, *, force_recreate: bool = False) -> FileConfig:
-    if force_recreate or not config_path.exists():
+    if force_recreate:
         return prompt_create_file_config(config_path)
-    return load_file_config(config_path)
+    if config_path.exists():
+        return load_file_config(config_path)
+
+    env_config = load_env_file_config()
+    if env_config is not None:
+        LOGGER.info("未找到配置文件，使用环境变量配置启动。")
+        return env_config
+
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "配置文件不存在且未提供必要环境变量。请至少设置 TG_API_ID、TG_API_HASH、TG_PHONE_NUMBER。"
+        )
+    return prompt_create_file_config(config_path)
 
 
 def configure_logging(level_name: str, log_path: Path | None = None) -> None:
@@ -432,6 +517,11 @@ def install_signal_handlers(stop_event: asyncio.Event) -> None:
 async def ensure_authorized(client: TelegramClient, config: AppConfig) -> None:
     if await client.is_user_authorized():
         return
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "当前 session 未授权且运行在非交互环境。请先在本地完成一次登录，生成并挂载 "
+            f"{config.session_name}.session 文件。"
+        )
 
     LOGGER.info("当前 session 未授权，开始登录账号：%s", config.phone_number)
     sent = await client.send_code_request(config.phone_number)
@@ -569,6 +659,8 @@ async def async_main(config_path: Path, *, init_only: bool = False) -> None:
         config.log_level,
         config_path.resolve().parent / "logs" / "tg_username_update.log",
     )
+    health_port = int(os.getenv("PORT", "7860"))
+    start_health_server(health_port)
 
     stop_event = asyncio.Event()
     install_signal_handlers(stop_event)
