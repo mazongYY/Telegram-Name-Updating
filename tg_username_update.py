@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from emoji import emojize
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError
+from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest
 
 
@@ -93,6 +94,7 @@ class FileConfig:
     phone_number: str
     timezone: str = "Asia/Shanghai"
     session_name: str = DEFAULT_SESSION_NAME
+    session_string: str | None = None
     update_interval: int = 30
     first_name: str | None = None
     username: str | None = None
@@ -118,6 +120,7 @@ class AppConfig:
     phone_number: str
     timezone: tzinfo
     session_name: str = DEFAULT_SESSION_NAME
+    session_string: str | None = None
     update_interval: int = 30
     first_name: str | None = None
     username: str | None = None
@@ -242,6 +245,7 @@ def build_app_config(config: FileConfig) -> AppConfig:
         phone_number=config.phone_number,
         timezone=resolve_timezone(config.timezone),
         session_name=config.session_name,
+        session_string=config.session_string,
         update_interval=config.update_interval,
         first_name=config.first_name,
         username=config.username,
@@ -267,6 +271,7 @@ def load_file_config(config_path: Path) -> FileConfig:
         phone_number=str(data["phone_number"]),
         timezone=str(data.get("timezone", "Asia/Shanghai")),
         session_name=str(data.get("session_name", DEFAULT_SESSION_NAME)),
+        session_string=normalize_optional_text(str(data.get("session_string", "") or "")),
         update_interval=int(data.get("update_interval", 30)),
         first_name=normalize_optional_text(str(data.get("first_name", "") or "")),
         username=normalize_optional_text(str(data.get("username", "") or "")),
@@ -327,6 +332,7 @@ def load_env_file_config() -> FileConfig | None:
         phone_number=phone_number,
         timezone=os.getenv("TG_TIMEZONE", "Asia/Shanghai"),
         session_name=os.getenv("TG_SESSION_NAME", DEFAULT_SESSION_NAME),
+        session_string=normalize_optional_text(os.getenv("TG_SESSION_STRING", "")),
         update_interval=int(os.getenv("TG_UPDATE_INTERVAL", "30")),
         first_name=normalize_optional_text(os.getenv("TG_FIRST_NAME", "")),
         username=normalize_optional_text(os.getenv("TG_USERNAME", "")),
@@ -514,6 +520,20 @@ def install_signal_handlers(stop_event: asyncio.Event) -> None:
         signal.signal(candidate, _request_stop)
 
 
+def create_telegram_client(config: AppConfig) -> TelegramClient:
+    session: str | StringSession = config.session_name
+    if config.session_string:
+        session = StringSession(config.session_string)
+        LOGGER.info("检测到 TG_SESSION_STRING，将使用字符串会话。")
+
+    return TelegramClient(
+        session,
+        config.api_id,
+        config.api_hash,
+        proxy=config.proxy,
+    )
+
+
 async def ensure_authorized(client: TelegramClient, config: AppConfig) -> None:
     if await client.is_user_authorized():
         return
@@ -665,12 +685,7 @@ async def async_main(config_path: Path, *, init_only: bool = False) -> None:
     stop_event = asyncio.Event()
     install_signal_handlers(stop_event)
 
-    client = TelegramClient(
-        config.session_name,
-        config.api_id,
-        config.api_hash,
-        proxy=config.proxy,
-    )
+    client = create_telegram_client(config)
     updater = ProfileUpdater(client, config)
 
     try:
