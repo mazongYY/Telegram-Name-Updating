@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import signal
+import time
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, tzinfo
@@ -95,6 +96,9 @@ class FileConfig:
     timezone: str = "Asia/Shanghai"
     session_name: str = DEFAULT_SESSION_NAME
     session_string: str | None = None
+    session_refresh_interval: int = 3600
+    hf_space_repo_id: str | None = None
+    hf_token: str | None = None
     update_interval: int = 30
     first_name: str | None = None
     username: str | None = None
@@ -121,6 +125,9 @@ class AppConfig:
     timezone: tzinfo
     session_name: str = DEFAULT_SESSION_NAME
     session_string: str | None = None
+    session_refresh_interval: int = 3600
+    hf_space_repo_id: str | None = None
+    hf_token: str | None = None
     update_interval: int = 30
     first_name: str | None = None
     username: str | None = None
@@ -246,6 +253,9 @@ def build_app_config(config: FileConfig) -> AppConfig:
         timezone=resolve_timezone(config.timezone),
         session_name=config.session_name,
         session_string=config.session_string,
+        session_refresh_interval=max(60, config.session_refresh_interval),
+        hf_space_repo_id=config.hf_space_repo_id,
+        hf_token=config.hf_token,
         update_interval=config.update_interval,
         first_name=config.first_name,
         username=config.username,
@@ -272,6 +282,9 @@ def load_file_config(config_path: Path) -> FileConfig:
         timezone=str(data.get("timezone", "Asia/Shanghai")),
         session_name=str(data.get("session_name", DEFAULT_SESSION_NAME)),
         session_string=normalize_optional_text(str(data.get("session_string", "") or "")),
+        session_refresh_interval=int(data.get("session_refresh_interval", 3600)),
+        hf_space_repo_id=normalize_optional_text(str(data.get("hf_space_repo_id", "") or "")),
+        hf_token=normalize_optional_text(str(data.get("hf_token", "") or "")),
         update_interval=int(data.get("update_interval", 30)),
         first_name=normalize_optional_text(str(data.get("first_name", "") or "")),
         username=normalize_optional_text(str(data.get("username", "") or "")),
@@ -333,6 +346,9 @@ def load_env_file_config() -> FileConfig | None:
         timezone=os.getenv("TG_TIMEZONE", "Asia/Shanghai"),
         session_name=os.getenv("TG_SESSION_NAME", DEFAULT_SESSION_NAME),
         session_string=normalize_optional_text(os.getenv("TG_SESSION_STRING", "")),
+        session_refresh_interval=max(60, int(os.getenv("TG_SESSION_REFRESH_INTERVAL", "3600"))),
+        hf_space_repo_id=normalize_optional_text(os.getenv("HF_SPACE_REPO_ID", os.getenv("SPACE_ID", ""))),
+        hf_token=normalize_optional_text(os.getenv("HF_TOKEN", "")),
         update_interval=int(os.getenv("TG_UPDATE_INTERVAL", "30")),
         first_name=normalize_optional_text(os.getenv("TG_FIRST_NAME", "")),
         username=normalize_optional_text(os.getenv("TG_USERNAME", "")),
@@ -534,6 +550,25 @@ def create_telegram_client(config: AppConfig) -> TelegramClient:
     )
 
 
+def sync_space_session_secret(repo_id: str, hf_token: str, session_string: str) -> None:
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        LOGGER.warning("未安装 huggingface_hub，跳过 TG_SESSION_STRING 自动回写。")
+        return
+
+    api = HfApi(token=hf_token)
+    api.add_space_secret(
+        repo_id=repo_id,
+        key="TG_SESSION_STRING",
+        value=session_string,
+    )
+
+
+def export_session_string(client: TelegramClient) -> str:
+    return StringSession.save(client.session)
+
+
 async def ensure_authorized(client: TelegramClient, config: AppConfig) -> None:
     if await client.is_user_authorized():
         return
@@ -567,6 +602,8 @@ class ProfileUpdater:
         self.config = config
         self.last_profile_payload: dict[str, str] | None = None
         self.username_synced = False
+        self.last_session_string: str | None = None
+        self.next_session_refresh_at = 0.0
 
     async def ensure_username(self) -> None:
         if not self.config.username or self.username_synced:
@@ -625,6 +662,40 @@ class ProfileUpdater:
         await self.client(UpdateProfileRequest(**payload))
         LOGGER.info("退出时已重置 last_name。")
 
+    async def refresh_session_artifacts(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now < self.next_session_refresh_at:
+            return
+        self.next_session_refresh_at = now + self.config.session_refresh_interval
+
+        if not await self.client.is_user_authorized():
+            return
+
+        session_string = export_session_string(self.client)
+        if not session_string:
+            LOGGER.warning("当前会话无法导出 StringSession，跳过刷新。")
+            return
+
+        if not force and session_string == self.last_session_string:
+            return
+
+        self.last_session_string = session_string
+        snapshot_path = Path(f"{self.config.session_name}.session.txt")
+        snapshot_path.write_text(session_string + "\n", encoding="utf-8")
+        LOGGER.info("已刷新本地会话快照：%s", snapshot_path)
+
+        if self.config.hf_space_repo_id and self.config.hf_token:
+            try:
+                await asyncio.to_thread(
+                    sync_space_session_secret,
+                    self.config.hf_space_repo_id,
+                    self.config.hf_token,
+                    session_string,
+                )
+                LOGGER.info("已自动回写 TG_SESSION_STRING 到 Space Secret。")
+            except Exception as exc:
+                LOGGER.warning("回写 TG_SESSION_STRING 失败：%s", exc)
+
     async def run(self, stop_event: asyncio.Event) -> None:
         await self.client.connect()
         await ensure_authorized(self.client, self.config)
@@ -638,6 +709,7 @@ class ProfileUpdater:
         LOGGER.info("已登录 Telegram 账号：%s", safe_text(display_name))
 
         await self.ensure_username()
+        await self.refresh_session_artifacts(force=True)
 
         if self.config.run_on_start:
             await self.run_once(datetime.now(self.config.timezone))
@@ -654,6 +726,7 @@ class ProfileUpdater:
 
             await self.ensure_username()
             await self.run_once(datetime.now(self.config.timezone))
+            await self.refresh_session_artifacts()
 
     async def run_once(self, now: datetime) -> None:
         try:
